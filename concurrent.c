@@ -41,6 +41,7 @@ SOFTWARE.
 #define ensure(x) for ( ; !(x) ; exit(EXIT_FAILURE) )
 
 int ignore = 0;
+int verbose = 0;
 int limit = 2;
 int batch = 1;
 int retry = 0;
@@ -127,7 +128,7 @@ void
 finish_process (int out, int err)
 {
   char buf[1024];
-  for (;;)
+  while (out)
   {
     int rc = read(out, buf, 1023);
 
@@ -138,20 +139,20 @@ finish_process (int out, int err)
     if (rc < 1023)
       break;
   }
-  ensure(close(out) == 0);
+  ensure(!out || close(out) == 0);
 
-  for (;;)
+  while (err)
   {
     int rc = read(err, buf, 1023);
 
     if (rc > 0)
-      ensure(write(STDOUT_FILENO, buf, rc) == rc);
+      ensure(write(STDERR_FILENO, buf, rc) == rc);
 
     // eof
     if (rc < 1023)
       break;
   }
-  ensure(close(err) == 0);
+  ensure(!err || close(err) == 0);
 }
 
 void
@@ -182,8 +183,21 @@ job_finish ()
     errx(EXIT_FAILURE, "unexpected job %d", pid);
   }
 
+  jobs_active--;
+
+  // failure, but can retry
+  if (status != 0 && (*job)->retry > 0)
+  {
+    ensure(close((*job)->out) == 0);
+    finish_process(0, (*job)->err);
+
+    (*job)->retry--;
+    (*job)->pid = start_process((*job)->lines, (*job)->count, &((*job)->in), &((*job)->out), &((*job)->err));
+    job_count++;
+  }
+  else
   // success or ignorable failure
-  if (status == 0 || (ignore && status != 0 && (*job)->retry == 0))
+  if (status == 0 || (ignore && status != 0))
   {
     finish_process((*job)->out, (*job)->err);
 
@@ -195,19 +209,8 @@ job_finish ()
     job_t *old = (*job);
     *job = (*job)->next;
     free(old);
-    jobs_active--;
   }
   else
-  // failure, but can retry
-  if (status != 0 && (*job)->retry > 0)
-  {
-    close((*job)->out);
-    (*job)->retry--;
-    (*job)->pid = start_process((*job)->lines, (*job)->count, &((*job)->in), &((*job)->out), &((*job)->err));
-    job_count++;
-  }
-  else
-  if (!ignore)
   // abort failure
   {
     signal(SIGCHLD, clean_up);
@@ -273,7 +276,8 @@ help()
     "-l N : Limit concurrency to N jobs (default: #cores)\n"
     "-b N : Batch size of N lines (default: 1)\n"
     "-r N : Retry failed jobs N times (default: 0)\n"
-    "-i   : Ingore job failures (default: abort)\n";
+    "-i   : Ingore job failures (default: abort)\n"
+    "-v   : Verbose logging (default: off)\n";
   ensure(write(STDOUT_FILENO, text, strlen(text)) == strlen(text));
 }
 
@@ -304,9 +308,14 @@ main (int argc, char const *argv[])
       retry = atoi(argv[++i]);
       continue;
     }
-    if ((strcmp(argv[i], "-i") == 0) && i < argc-1)
+    if ((strcmp(argv[i], "-i") == 0))
     {
       ignore = 1;
+      continue;
+    }
+    if ((strcmp(argv[i], "-v") == 0))
+    {
+      verbose = 1;
       continue;
     }
     if (argv[i][0] == '-')
@@ -331,7 +340,8 @@ main (int argc, char const *argv[])
   ensure(command)
     errx(EXIT_FAILURE, "missing command");
 
-  warnx("limit %d batch %d retry %d command %s", limit, batch, retry, command);
+  if (verbose)
+    warnx("limit %d batch %d retry %d command %s", limit, batch, retry, command);
 
   char *line;
   char **lines;
@@ -362,7 +372,8 @@ main (int argc, char const *argv[])
   while (jobs_active > 0)
     job_finish();
 
-  warnx("jobs %lu", job_count);
+  if (verbose)
+    warnx("jobs %lu", job_count);
 
   return EXIT_SUCCESS;
 }
