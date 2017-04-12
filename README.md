@@ -21,7 +21,7 @@ Quite easy to use `concurrent` and `xargs` together in creative ways (or to fork
 
 ## vs GNU Parallel
 
-* Much narrower use case. Unix *do-one-thing-well* approach. Lightwe weight.
+* Much narrower use case. Unix *do-one-thing-well* approach. Light weight.
 * Similar automatic interleaving of output so that individual lines do not break.
 * Similar automatic grouping of output lines from individual jobs for readabilty.
 * But no attempt to preserve output order in job order. Faster jobs are not held back.
