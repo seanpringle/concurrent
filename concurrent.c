@@ -234,9 +234,8 @@ job_finish ()
       read_buffered(j->err, &j->errbuf);
     }
 
-    usleep(1000);
-
     pid = waitpid(-1, &status, WNOHANG);
+    if (pid == 0) usleep(1);
   }
 
   if (pid <= 0)
