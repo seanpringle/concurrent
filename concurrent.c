@@ -42,6 +42,7 @@ SOFTWARE.
 
 #define ensure(x) for ( ; !(x) ; exit(EXIT_FAILURE) )
 
+int fail = 0;
 int ignore = 0;
 int verbose = 0;
 int limit = 2;
@@ -195,9 +196,25 @@ start_process (char **lines, int count, int *in, int *out, int *err)
 }
 
 void
-clean_up (int sig)
+job_destroy (job_t *job)
 {
-  while (0 < waitpid(-1, NULL, WNOHANG));
+  free(job->outbuf.data);
+  job->outbuf.data = NULL;
+
+  free(job->errbuf.data);
+  job->errbuf.data = NULL;
+
+  for (int i = 0; i < job->count; i++)
+    free(job->lines[i]);
+
+  free(job->lines);
+  job->lines = NULL;
+
+  ensure(close(job->out) == 0);
+  job->out = -1;
+
+  ensure(close(job->err) == 0);
+  job->err = -1;
 }
 
 pid_t
@@ -231,10 +248,7 @@ job_finish ()
     pjob = &((*pjob)->next);
 
   ensure(*pjob)
-  {
-    signal(SIGCHLD, clean_up);
-    errx(EXIT_FAILURE, "unexpected job %d", pid);
-  }
+    warnx("%d unknown", pid);
 
   jobs_active--;
   job_t *job = *pjob;
@@ -247,7 +261,7 @@ job_finish ()
     write_exactly(STDERR_FILENO, job->errbuf.data, job->errbuf.len);
 
   // failure, but can retry
-  if (status != 0 && job->retry > 0)
+  if (status != 0 && job->retry > 0 && !fail)
   {
     read_through(job->err, STDERR_FILENO);
 
@@ -282,17 +296,7 @@ job_finish ()
 
     read_through(job->err, STDERR_FILENO);
     read_through(job->out, STDOUT_FILENO);
-
-    ensure(close(job->out) == 0);
-    ensure(close(job->err) == 0);
-
-    free(job->outbuf.data);
-    free(job->errbuf.data);
-
-    for (int i = 0; i < job->count; i++)
-      free(job->lines[i]);
-
-    free(job->lines);
+    job_destroy(job);
 
     *pjob = job->next;
     free(job);
@@ -301,12 +305,23 @@ job_finish ()
       warnx("%d %s", pid, status ? "fail (ignored)": "finish");
   }
   else
-  // abort failure
+  // abort
   {
     read_through(job->err, STDERR_FILENO);
+    job_destroy(job);
 
-    signal(SIGCHLD, clean_up);
-    errx(EXIT_FAILURE, "%d fail", pid);
+    *pjob = job->next;
+    free(job);
+
+    if (verbose) warnx("%d fail", pid);
+
+    for (job_t *j = jobs; j; j = j->next)
+    {
+      kill(j->pid, SIGTERM);
+      if (verbose) warnx("%d kill", j->pid);
+    }
+
+    fail = 1;
   }
 
   return pid;
@@ -317,6 +332,8 @@ start_job (char **lines, int count)
 {
   while (jobs_active >= limit)
     job_finish();
+
+  if (fail) return;
 
   job_t *job = calloc(1, sizeof(job_t));
   ensure(job) warnx("calloc fail %lu", sizeof(job_t));
@@ -429,16 +446,16 @@ main (int argc, char const *argv[])
   }
 
   ensure(limit > 0)
-    errx(EXIT_FAILURE, "invalid limit %d", limit);
+    warnx("invalid limit %d", limit);
 
   ensure(batch > 0)
-    errx(EXIT_FAILURE, "invalid batch %d", batch);
+    warnx("invalid batch %d", batch);
 
   ensure(retry >= 0)
-    errx(EXIT_FAILURE, "invalid retry %d", retry);
+    warnx("invalid retry %d", retry);
 
   ensure(command)
-    errx(EXIT_FAILURE, "missing command");
+    warnx("missing command");
 
   if (verbose)
     warnx("limit %d batch %d retry %d ignore %d command %s", limit, batch, retry, ignore, command);
@@ -447,7 +464,7 @@ main (int argc, char const *argv[])
   char **lines;
   int count = 0;
 
-  while ((line = read_line(stdin)))
+  while (!fail && (line = read_line(stdin)))
   {
     if (!lines)
       lines = calloc(batch, sizeof(char*));
