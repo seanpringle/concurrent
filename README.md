@@ -14,7 +14,7 @@ concurrent [-l N] [-b N] [-r N] [-i] COMMAND
 
 ## vs `xargs --max-procs`
 
-* Output lines from *stdout* and *stderr* are interleaved cleanly.
+* Output lines from *stdout* and *stderr* are interleaved and grouped cleanly.
 * Orthogonal usage that has nothing to do with argument manipulation or translating stdin to arguments.
 
 Quite easy to use `concurrent` and `xargs` together in creative ways (or to fork-bomb yourself).
