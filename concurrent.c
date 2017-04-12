@@ -328,7 +328,7 @@ job_finish ()
 }
 
 void
-start_job (char **lines, int count)
+job_start (char **lines, int count)
 {
   while (jobs_active >= limit)
     job_finish();
@@ -479,7 +479,7 @@ main (int argc, char const *argv[])
 
     if (count == batch)
     {
-      start_job(lines, count);
+      job_start(lines, count);
       count = 0;
       lines = NULL;
     }
@@ -487,7 +487,7 @@ main (int argc, char const *argv[])
 
   if (count > 0)
   {
-    start_job(lines, count);
+    job_start(lines, count);
     count = 0;
     lines = NULL;
   }
