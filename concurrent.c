@@ -253,7 +253,7 @@ job_finish ()
   jobs_active--;
   job_t *job = *pjob;
 
-  if (job->errbuf.len > 0 && verbose)
+  if (job->errbuf.len > 0 && verbose > 1)
     warnx("%d errbuf %d", pid, job->errbuf.len);
 
   // always relay errors
@@ -288,7 +288,7 @@ job_finish ()
   // success or ignorable failure
   if (status == 0 || (ignore && status != 0))
   {
-    if (job->outbuf.len > 0 && verbose)
+    if (job->outbuf.len > 0 && verbose > 1)
       warnx("%d outbuf %d", pid, job->outbuf.len);
 
     if (job->outbuf.len > 0)
@@ -394,7 +394,8 @@ help()
     "-b N : Batch size of N lines (default: 1)\n"
     "-r N : Retry failed jobs N times (default: 0)\n"
     "-i   : Ignore job failures (default: abort)\n"
-    "-v   : Verbose logging (default: off)\n";
+    "-v   : Verbose logging (default: off)\n"
+    "-vv  : More verbose logging\n";
   write_exactly(STDOUT_FILENO, text, strlen(text));
 }
 
@@ -433,6 +434,11 @@ main (int argc, char const *argv[])
     if ((strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0))
     {
       verbose = 1;
+      continue;
+    }
+    if ((strcmp(argv[i], "-vv") == 0))
+    {
+      verbose = 2;
       continue;
     }
     if (argv[i][0] == '-')
