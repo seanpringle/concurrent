@@ -373,7 +373,6 @@ help()
 {
   const char *text =
     "concurrent [-l N] [-b N] [-r N] [-i] COMMAND\n"
-    "Run concurrent instances of a command distributing input and interleaving output.\n"
     "-l N : Limit concurrency to N jobs (default: #cores)\n"
     "-b N : Batch size of N lines (default: 1)\n"
     "-r N : Retry failed jobs N times (default: 0)\n"
