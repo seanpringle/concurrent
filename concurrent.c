@@ -34,7 +34,9 @@ SOFTWARE.
 #include <string.h>
 #include <unistd.h>
 #include <err.h>
+#include <errno.h>
 #include <signal.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
 
@@ -49,11 +51,18 @@ int retry = 0;
 const char *command;
 char * const *cargs;
 
+typedef struct _buf_t {
+  char *data;
+  int len;
+} buf_t;
+
 typedef struct _job_t {
   pid_t pid;
   int in;
   int out;
+  buf_t outbuf;
   int err;
+  buf_t errbuf;
   int retry;
   char **lines;
   int count;
@@ -66,6 +75,67 @@ uint64_t job_count;
 
 #define READ 0
 #define WRITE 1
+
+void
+write_exactly (int fd, const void *buf, size_t count)
+{
+  size_t written = 0;
+
+  while (written < count)
+  {
+    size_t rc = write(fd, buf + written, count - written);
+
+    if (rc < 0 && errno == EINTR)
+      continue;
+
+    ensure(rc >= 0)
+      warnx("write_exactly() %d", errno);
+
+    written += rc;
+  }
+}
+
+void
+read_buffered (int fd, buf_t *buf)
+{
+  while (poll(&(struct pollfd){ .fd = fd, .events = POLLIN }, 1, 0) == 1)
+  {
+    buf->data = realloc(buf->data, buf->len + 1024);
+    int rc = read(fd, buf->data + buf->len, 1023);
+
+    if (rc == 0)
+      break;
+
+    if (rc < 0 && errno == EINTR)
+      continue;
+
+    ensure(rc > 0)
+      warnx("read_buffered() %d", errno);
+
+    buf->len += rc;
+  }
+}
+
+void
+read_through (int src, int dst)
+{
+  char buf[1024];
+  while (src)
+  {
+    int rc = read(src, buf, 1023);
+
+    if (rc == 0)
+      break;
+
+    if (rc < 0 && errno == EINTR)
+      continue;
+
+    ensure(rc > 0)
+      warnx("read_through() %d", errno);
+
+    write_exactly(dst, buf, rc);
+  }
+}
 
 pid_t
 exec_piped (int *in, int *out, int *err)
@@ -117,42 +187,11 @@ start_process (char **lines, int count, int *in, int *out, int *err)
   for (int j = 0; j < count; j++)
   {
     int len = strlen(lines[j]);
-    ensure(write(*in, lines[j], len) == len);
+    write_exactly(*in, lines[j], len);
   }
 
-  close(*in);
+  ensure(close(*in) == 0);
   return pid;
-}
-
-void
-finish_process (int out, int err)
-{
-  char buf[1024];
-  while (out)
-  {
-    int rc = read(out, buf, 1023);
-
-    if (rc > 0)
-      ensure(write(STDOUT_FILENO, buf, rc) == rc);
-
-    // eof
-    if (rc < 1023)
-      break;
-  }
-  ensure(!out || close(out) == 0);
-
-  while (err)
-  {
-    int rc = read(err, buf, 1023);
-
-    if (rc > 0)
-      ensure(write(STDERR_FILENO, buf, rc) == rc);
-
-    // eof
-    if (rc < 1023)
-      break;
-  }
-  ensure(!err || close(err) == 0);
 }
 
 void
@@ -165,56 +204,109 @@ pid_t
 job_finish ()
 {
   int status;
-  pid_t pid;
+  pid_t pid = waitpid(-1, &status, WNOHANG);
 
-  pid = wait(&status);
+  // Using wait() is insufficient as it's possible for all jobs to be
+  // blocked writing to stdout/stderr. This semi-busy loop flip-flops
+  // between buffering job output and waiting for the first exit.
+  while (pid == 0)
+  {
+    for (job_t *j = jobs; j; j = j->next)
+    {
+      read_buffered(j->out, &j->outbuf);
+      read_buffered(j->err, &j->errbuf);
+    }
+
+    usleep(1000);
+
+    pid = waitpid(-1, &status, WNOHANG);
+  }
 
   if (pid <= 0)
     return pid;
 
-  job_t **job = &jobs;
+  job_t **pjob = &jobs;
 
-  while (*job && (*job)->pid != pid)
-    job = &((*job)->next);
+  while (*pjob && (*pjob)->pid != pid)
+    pjob = &((*pjob)->next);
 
-  ensure(*job)
+  ensure(*pjob)
   {
     signal(SIGCHLD, clean_up);
     errx(EXIT_FAILURE, "unexpected job %d", pid);
   }
 
   jobs_active--;
+  job_t *job = *pjob;
+
+  if (job->errbuf.len > 0 && verbose)
+    warnx("%d errbuf %d", pid, job->errbuf.len);
+
+  // always relay errors
+  if (job->errbuf.len > 0)
+    write_exactly(STDERR_FILENO, job->errbuf.data, job->errbuf.len);
 
   // failure, but can retry
-  if (status != 0 && (*job)->retry > 0)
+  if (status != 0 && job->retry > 0)
   {
-    ensure(close((*job)->out) == 0);
-    finish_process(0, (*job)->err);
+    read_through(job->err, STDERR_FILENO);
 
-    (*job)->retry--;
-    (*job)->pid = start_process((*job)->lines, (*job)->count, &((*job)->in), &((*job)->out), &((*job)->err));
+    ensure(close(job->out) == 0);
+    ensure(close(job->err) == 0);
+
+    job->outbuf.data[0] = 0;
+    job->outbuf.len = 0;
+
+    job->errbuf.data[0] = 0;
+    job->errbuf.len = 0;
+
+    job->retry--;
+
+    jobs_active++;
     job_count++;
+
+    job->pid = start_process(job->lines, job->count, &(job->in), &(job->out), &(job->err));
+
+    if (verbose)
+      warnx("%d start (retry %d)", job->pid, pid);
   }
   else
   // success or ignorable failure
   if (status == 0 || (ignore && status != 0))
   {
-    finish_process((*job)->out, (*job)->err);
+    if (job->outbuf.len > 0 && verbose)
+      warnx("%d outbuf %d", pid, job->outbuf.len);
 
-    for (int i = 0; i < (*job)->count; i++)
-      free((*job)->lines[i]);
+    if (job->outbuf.len > 0)
+      write_exactly(STDOUT_FILENO, job->outbuf.data, job->outbuf.len);
 
-    free((*job)->lines);
+    read_through(job->err, STDERR_FILENO);
+    read_through(job->out, STDOUT_FILENO);
 
-    job_t *old = (*job);
-    *job = (*job)->next;
-    free(old);
+    ensure(close(job->out) == 0);
+    ensure(close(job->err) == 0);
+
+    free(job->outbuf.data);
+    free(job->errbuf.data);
+
+    for (int i = 0; i < job->count; i++)
+      free(job->lines[i]);
+
+    free(job->lines);
+
+    *pjob = job->next;
+    free(job);
+
+    if (verbose)
+      warnx("%d %s", pid, status ? "fail (ignored)": "finish");
   }
   else
   // abort failure
   {
+    read_through(job->err, STDERR_FILENO);
+
     signal(SIGCHLD, clean_up);
-    errx(EXIT_FAILURE, "failed job %d", pid);
+    errx(EXIT_FAILURE, "%d fail", pid);
   }
 
   return pid;
@@ -227,13 +319,22 @@ start_job (char **lines, int count)
     job_finish();
 
   job_t *job = calloc(1, sizeof(job_t));
+  ensure(job) warnx("calloc fail %lu", sizeof(job_t));
+
   job->lines = lines;
   job->count = count;
   job->retry = retry;
+
+  ensure((job->outbuf.data = calloc(1, 1024)) && (job->errbuf.data = calloc(1, 1024)))
+    warnx("calloc fail 1024");
+
   jobs_active++;
   job_count++;
 
   job->pid = start_process(job->lines, job->count, &(job->in), &(job->out), &(job->err));
+
+  if (verbose)
+    warnx("%d start", job->pid);
 
   job->next = jobs;
   jobs = job;
@@ -247,7 +348,7 @@ read_line (FILE *file)
   char *line = malloc(bytes+1);
 
   ensure(line)
-    warnx("malloc failed %lu", bytes+1);
+    warnx("malloc fail %lu", bytes+1);
 
   line[0] = 0;
 
@@ -257,7 +358,7 @@ read_line (FILE *file)
     line = realloc(line, bytes+1);
 
     ensure(line)
-      warnx("realloc failed %lu", bytes+1);
+      warnx("realloc fail %lu", bytes+1);
   }
   if (ferror(file) || (!line[0] && feof(file)))
   {
@@ -276,9 +377,9 @@ help()
     "-l N : Limit concurrency to N jobs (default: #cores)\n"
     "-b N : Batch size of N lines (default: 1)\n"
     "-r N : Retry failed jobs N times (default: 0)\n"
-    "-i   : Ingore job failures (default: abort)\n"
+    "-i   : Ignore job failures (default: abort)\n"
     "-v   : Verbose logging (default: off)\n";
-  ensure(write(STDOUT_FILENO, text, strlen(text)) == strlen(text));
+  write_exactly(STDOUT_FILENO, text, strlen(text));
 }
 
 int
@@ -293,27 +394,27 @@ main (int argc, char const *argv[])
       help();
       return EXIT_SUCCESS;
     }
-    if ((strcmp(argv[i], "-l") == 0) && i < argc-1)
+    if ((strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--limit") == 0) && i < argc-1)
     {
       limit = atoi(argv[++i]);
       continue;
     }
-    if ((strcmp(argv[i], "-b") == 0) && i < argc-1)
+    if ((strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--batch") == 0) && i < argc-1)
     {
       batch = atoi(argv[++i]);
       continue;
     }
-    if ((strcmp(argv[i], "-r") == 0) && i < argc-1)
+    if ((strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--retry") == 0) && i < argc-1)
     {
       retry = atoi(argv[++i]);
       continue;
     }
-    if ((strcmp(argv[i], "-i") == 0))
+    if ((strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--ignore") == 0))
     {
       ignore = 1;
       continue;
     }
-    if ((strcmp(argv[i], "-v") == 0))
+    if ((strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0))
     {
       verbose = 1;
       continue;
@@ -341,7 +442,7 @@ main (int argc, char const *argv[])
     errx(EXIT_FAILURE, "missing command");
 
   if (verbose)
-    warnx("limit %d batch %d retry %d command %s", limit, batch, retry, command);
+    warnx("limit %d batch %d retry %d ignore %d command %s", limit, batch, retry, ignore, command);
 
   char *line;
   char **lines;
