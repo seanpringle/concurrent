@@ -497,5 +497,5 @@ main (int argc, char const *argv[])
   if (verbose)
     warnx("jobs %lu", job_count);
 
-  return EXIT_SUCCESS;
+  return fail ? EXIT_FAILURE: EXIT_SUCCESS;
 }
