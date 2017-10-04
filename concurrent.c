@@ -294,7 +294,10 @@ job_finish ()
       write_exactly(STDOUT_FILENO, job->outbuf.data, job->outbuf.len);
 
     read_through(job->err, STDERR_FILENO);
-    read_through(job->out, STDOUT_FILENO);
+
+    if (status == 0)
+      read_through(job->out, STDOUT_FILENO);
+
     job_destroy(job);
 
     *pjob = job->next;
