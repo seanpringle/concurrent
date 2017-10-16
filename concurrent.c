@@ -287,16 +287,18 @@ job_finish ()
   // success or ignorable failure
   if (status == 0 || (ignore && status != 0))
   {
-    if (job->outbuf.len > 0 && verbose > 1)
-      warnx("%d outbuf %d", pid, job->outbuf.len);
+    if (status == 0)
+    {
+      if (job->outbuf.len > 0 && verbose > 1)
+        warnx("%d outbuf %d", pid, job->outbuf.len);
 
-    if (job->outbuf.len > 0)
-      write_exactly(STDOUT_FILENO, job->outbuf.data, job->outbuf.len);
+      if (job->outbuf.len > 0)
+        write_exactly(STDOUT_FILENO, job->outbuf.data, job->outbuf.len);
+
+      read_through(job->out, STDOUT_FILENO);
+    }
 
     read_through(job->err, STDERR_FILENO);
-
-    if (status == 0)
-      read_through(job->out, STDOUT_FILENO);
 
     job_destroy(job);
 
